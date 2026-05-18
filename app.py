@@ -3,6 +3,7 @@ import cv2
 import tempfile
 import os
 import numpy as np
+from urllib.request import urlretrieve
 from ultralytics import YOLOv10
 
 FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
@@ -48,7 +49,33 @@ def _apply_face_filter(frame, overlay_image, opacity):
 
 def _get_model(model_id):
     if model_id not in _MODEL_CACHE:
-        _MODEL_CACHE[model_id] = YOLOv10.from_pretrained(f"jameslahm/{model_id}")
+        fallback_weights = f"{model_id}.pt"
+        if os.path.exists(fallback_weights):
+            _MODEL_CACHE[model_id] = YOLOv10(fallback_weights)
+            return _MODEL_CACHE[model_id]
+
+        # Avoid Hub safetensors code path by downloading plain .pt weights directly.
+        weights_dir = "weights"
+        os.makedirs(weights_dir, exist_ok=True)
+        cached_weights = os.path.join(weights_dir, fallback_weights)
+        if not os.path.exists(cached_weights):
+            urls = [
+                f"https://github.com/THU-MIG/yolov10/releases/download/v1.1/{fallback_weights}",
+                f"https://github.com/THU-MIG/yolov10/releases/download/v1.0/{fallback_weights}",
+            ]
+            last_error = None
+            for url in urls:
+                try:
+                    urlretrieve(url, cached_weights)
+                    break
+                except Exception as e:
+                    last_error = e
+            if not os.path.exists(cached_weights):
+                raise RuntimeError(
+                    f"Failed to load model '{model_id}'. Missing local weights '{fallback_weights}' and "
+                    f"automatic download failed. Last download error: {last_error}"
+                ) from last_error
+        _MODEL_CACHE[model_id] = YOLOv10(cached_weights)
     return _MODEL_CACHE[model_id]
 
 
@@ -131,17 +158,24 @@ def yolov10_inference_for_examples(image, model_path, image_size, conf_threshold
 
 
 def app():
-    with gr.Blocks():
+    with gr.Blocks(
+        theme=gr.themes.Soft(),
+        css="""
+        .gr-button {border-radius: 12px !important; font-weight: 700 !important;}
+        .title-main {text-align:center; font-size: 30px; font-weight: 800; margin: 8px 0 2px;}
+        .title-sub {text-align:center; opacity:0.9; margin-bottom: 12px;}
+        """,
+    ):
         with gr.Row():
             with gr.Column():
-                image = gr.Image(type="pil", label="Image", sources=["upload", "webcam"], visible=True)
-                video = gr.Video(label="Video / Webcam Recording", sources=["upload", "webcam"], visible=False)
+                image = gr.Image(type="pil", label="Image", sources=["upload"], visible=True)
+                video = gr.Video(label="Video", sources=["upload"], visible=False)
                 input_type = gr.Radio(
                     choices=["Image", "Video"],
                     value="Image",
                     label="Input Type",
                 )
-                overlay_image = gr.Image(type="pil", label="Filter Overlay (Canvas/Image)", sources=["upload", "clipboard", "webcam"])
+                overlay_image = gr.Image(type="pil", label="Filter Overlay Image (optional)", sources=["upload"])
                 overlay_opacity = gr.Slider(
                     label="Filter Opacity",
                     minimum=0.0,
@@ -186,10 +220,12 @@ def app():
                     step=1,
                     value=2,
                 )
-                yolov10_infer = gr.Button(value="Detect Objects")
+                yolov10_infer = gr.Button(value="🚀 Detect Objects")
+                status_text = gr.Markdown("✅ Ready. Upload an image/video and click **Detect Objects**.")
 
             with gr.Column():
                 output_image = gr.Image(type="numpy", label="Annotated Image", visible=True)
+                result_summary = gr.Markdown("")
                 output_video = gr.Video(label="Annotated Video", visible=False)
                 live_preview = gr.Image(type="numpy", label="Live Video Preview", visible=False)
 
@@ -210,18 +246,25 @@ def app():
 
         def run_inference(image, video, model_id, image_size, conf_threshold, input_type, overlay_image, overlay_opacity,
                           face_filter_only, preview_stride):
-            if input_type == "Image":
-                result = yolov10_inference(
-                    image,
-                    model_id,
-                    image_size,
-                    conf_threshold,
-                    overlay_image,
-                    overlay_opacity,
-                    face_filter_only,
-                )
-                return result
-            else:
+            try:
+                if input_type == "Image":
+                    if image is None:
+                        return None, None, None, "⚠️ Please upload an image first.", ""
+                    annotated, _, preview = yolov10_inference(
+                        image,
+                        model_id,
+                        image_size,
+                        conf_threshold,
+                        overlay_image,
+                        overlay_opacity,
+                        face_filter_only,
+                    )
+                    if annotated is None:
+                        return None, None, None, "⚠️ No output generated. Try another image.", ""
+                    summary = f"**Model:** `{model_id}` | **Input:** Image | **Conf:** `{conf_threshold}`"
+                    return annotated, None, preview, "✅ Detection completed successfully.", summary
+                if video is None:
+                    return None, None, None, "⚠️ Please upload a video first.", ""
                 return yolov10_video_inference(
                     video,
                     model_id,
@@ -232,13 +275,43 @@ def app():
                     face_filter_only,
                     preview_stride,
                 )
+            except Exception as e:
+                return None, None, None, f"❌ Error: {str(e)}", "Try disabling face-only filter or use another file."
+
+        def run_video_inference_with_status(image, video, model_id, image_size, conf_threshold, input_type, overlay_image,
+                                            overlay_opacity, face_filter_only, preview_stride):
+            if input_type == "Image":
+                yield run_inference(
+                    image, video, model_id, image_size, conf_threshold, input_type, overlay_image,
+                    overlay_opacity, face_filter_only, preview_stride,
+                )
+                return
+            if video is None:
+                yield None, None, None, "⚠️ Please upload a video first.", ""
+                return
+            try:
+                for _, out_video, preview in yolov10_video_inference(
+                    video,
+                    model_id,
+                    image_size,
+                    conf_threshold,
+                    overlay_image,
+                    overlay_opacity,
+                    face_filter_only,
+                    preview_stride,
+                ):
+                    status = "⏳ Processing video..." if out_video is None else "✅ Video detection completed."
+                    summary = f"**Model:** `{model_id}` | **Input:** Video | **Conf:** `{conf_threshold}`"
+                    yield None, out_video, preview, status, summary
+            except Exception as e:
+                yield None, None, None, f"❌ Error: {str(e)}", "Try MP4/WebM file and reduce image size."
 
 
         yolov10_infer.click(
-            fn=run_inference,
+            fn=run_video_inference_with_status,
             inputs=[image, video, model_id, image_size, conf_threshold, input_type, overlay_image, overlay_opacity,
                     face_filter_only, preview_stride],
-            outputs=[output_image, output_video, live_preview],
+            outputs=[output_image, output_video, live_preview, status_text, result_summary],
         )
 
         gr.Examples(
@@ -274,9 +347,8 @@ gradio_app = gr.Blocks()
 with gradio_app:
     gr.HTML(
         """
-    <h1 style='text-align: center'>
-    YOLOv10: Real-Time End-to-End Object Detection
-    </h1>
+    <div class='title-main'>🚲 YOLOv10 Smart Object Detection Studio</div>
+    <div class='title-sub'>Upload an image/video and detect objects with smoother UX.</div>
     """)
     gr.HTML(
         """
