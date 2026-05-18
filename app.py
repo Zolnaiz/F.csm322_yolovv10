@@ -17,6 +17,18 @@ def _apply_overlay(frame, overlay_image, opacity):
     return cv2.addWeighted(frame, 1 - opacity, overlay, opacity, 0)
 
 
+def _blend_overlay_roi(roi, overlay_rgb, opacity):
+    if overlay_rgb.shape[-1] == 4:
+        overlay_bgr = cv2.cvtColor(overlay_rgb[:, :, :3], cv2.COLOR_RGB2BGR)
+        alpha = (overlay_rgb[:, :, 3].astype(np.float32) / 255.0) * opacity
+        alpha = np.expand_dims(alpha, axis=-1)
+        blended = (roi.astype(np.float32) * (1.0 - alpha) + overlay_bgr.astype(np.float32) * alpha)
+        return blended.astype(np.uint8)
+
+    overlay_bgr = cv2.cvtColor(overlay_rgb, cv2.COLOR_RGB2BGR)
+    return cv2.addWeighted(roi, 1 - opacity, overlay_bgr, opacity, 0)
+
+
 def _apply_face_filter(frame, overlay_image, opacity):
     """Detect faces and apply filter overlay only on face regions."""
     if overlay_image is None or opacity <= 0:
@@ -26,12 +38,11 @@ def _apply_face_filter(frame, overlay_image, opacity):
     if len(faces) == 0:
         return frame
 
-    overlay_rgb = np.array(overlay_image.convert("RGB"))
+    overlay_rgba = np.array(overlay_image.convert("RGBA"))
     for x, y, w, h in faces:
-        resized = cv2.resize(overlay_rgb, (w, h))
-        resized_bgr = cv2.cvtColor(resized, cv2.COLOR_RGB2BGR)
+        resized = cv2.resize(overlay_rgba, (w, h))
         roi = frame[y:y + h, x:x + w]
-        frame[y:y + h, x:x + w] = cv2.addWeighted(roi, 1 - opacity, resized_bgr, opacity, 0)
+        frame[y:y + h, x:x + w] = _blend_overlay_roi(roi, resized, opacity)
     return frame
 
 
@@ -58,7 +69,7 @@ def yolov10_inference(image, model_id, image_size, conf_threshold, overlay_image
 
 
 def yolov10_video_inference(video, model_id, image_size, conf_threshold, overlay_image=None, overlay_opacity=0.0,
-                            face_filter_only=False):
+                            face_filter_only=False, preview_stride=1):
     if video is None:
         yield None, None, None
         return
@@ -76,8 +87,14 @@ def yolov10_video_inference(video, model_id, image_size, conf_threshold, overlay
 
     with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as output_tmp:
         output_video_path = output_tmp.name
+    if fps <= 0:
+        fps = 25.0
     out = cv2.VideoWriter(output_video_path, cv2.VideoWriter_fourcc(*'vp80'), fps, (frame_width, frame_height))
+    if not out.isOpened():
+        output_video_path = output_video_path.rsplit(".", 1)[0] + ".mp4"
+        out = cv2.VideoWriter(output_video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (frame_width, frame_height))
 
+    frame_index = 0
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
@@ -90,7 +107,9 @@ def yolov10_video_inference(video, model_id, image_size, conf_threshold, overlay
         results = model.predict(source=frame, imgsz=image_size, conf=conf_threshold)
         annotated_frame = results[0].plot()
         out.write(annotated_frame)
-        yield None, None, annotated_frame[:, :, ::-1]
+        if frame_index % max(preview_stride, 1) == 0:
+            yield None, None, annotated_frame[:, :, ::-1]
+        frame_index += 1
 
     cap.release()
     out.release()
@@ -160,6 +179,13 @@ def app():
                     step=0.05,
                     value=0.25,
                 )
+                preview_stride = gr.Slider(
+                    label="Live Preview Frame Stride (Video)",
+                    minimum=1,
+                    maximum=10,
+                    step=1,
+                    value=2,
+                )
                 yolov10_infer = gr.Button(value="Detect Objects")
 
             with gr.Column():
@@ -183,7 +209,7 @@ def app():
         )
 
         def run_inference(image, video, model_id, image_size, conf_threshold, input_type, overlay_image, overlay_opacity,
-                          face_filter_only):
+                          face_filter_only, preview_stride):
             if input_type == "Image":
                 result = yolov10_inference(
                     image,
@@ -204,13 +230,14 @@ def app():
                     overlay_image,
                     overlay_opacity,
                     face_filter_only,
+                    preview_stride,
                 )
 
 
         yolov10_infer.click(
             fn=run_inference,
             inputs=[image, video, model_id, image_size, conf_threshold, input_type, overlay_image, overlay_opacity,
-                    face_filter_only],
+                    face_filter_only, preview_stride],
             outputs=[output_image, output_video, live_preview],
         )
 
