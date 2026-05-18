@@ -1,10 +1,12 @@
 import gradio as gr
 import cv2
 import tempfile
+import os
 import numpy as np
 from ultralytics import YOLOv10
 
 FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+_MODEL_CACHE = {}
 
 
 def _apply_overlay(frame, overlay_image, opacity):
@@ -33,34 +35,47 @@ def _apply_face_filter(frame, overlay_image, opacity):
     return frame
 
 
+def _get_model(model_id):
+    if model_id not in _MODEL_CACHE:
+        _MODEL_CACHE[model_id] = YOLOv10.from_pretrained(f"jameslahm/{model_id}")
+    return _MODEL_CACHE[model_id]
+
+
 def yolov10_inference(image, model_id, image_size, conf_threshold, overlay_image=None, overlay_opacity=0.0,
                       face_filter_only=False):
-    model = YOLOv10.from_pretrained(f'jameslahm/{model_id}')
-    if image:
-        image_bgr = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
-        if face_filter_only:
-            image_bgr = _apply_face_filter(image_bgr, overlay_image, overlay_opacity)
-        else:
-            image_bgr = _apply_overlay(image_bgr, overlay_image, overlay_opacity)
-        results = model.predict(source=image_bgr, imgsz=image_size, conf=conf_threshold)
-        annotated_image = results[0].plot()
-        return annotated_image[:, :, ::-1], None, annotated_image[:, :, ::-1]
+    if image is None:
+        return None, None, None
+
+    model = _get_model(model_id)
+    image_bgr = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
+    if face_filter_only:
+        image_bgr = _apply_face_filter(image_bgr, overlay_image, overlay_opacity)
+    else:
+        image_bgr = _apply_overlay(image_bgr, overlay_image, overlay_opacity)
+    results = model.predict(source=image_bgr, imgsz=image_size, conf=conf_threshold)
+    annotated_image = results[0].plot()
+    return annotated_image[:, :, ::-1], None, annotated_image[:, :, ::-1]
 
 
 def yolov10_video_inference(video, model_id, image_size, conf_threshold, overlay_image=None, overlay_opacity=0.0,
                             face_filter_only=False):
-    model = YOLOv10.from_pretrained(f'jameslahm/{model_id}')
-    video_path = tempfile.mktemp(suffix=".webm")
-    with open(video_path, "wb") as f:
+    if video is None:
+        yield None, None, None
+        return
+
+    model = _get_model(model_id)
+    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as input_tmp:
         with open(video, "rb") as g:
-            f.write(g.read())
+            input_tmp.write(g.read())
+        video_path = input_tmp.name
 
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    output_video_path = tempfile.mktemp(suffix=".webm")
+    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as output_tmp:
+        output_video_path = output_tmp.name
     out = cv2.VideoWriter(output_video_path, cv2.VideoWriter_fourcc(*'vp80'), fps, (frame_width, frame_height))
 
     while cap.isOpened():
@@ -79,6 +94,8 @@ def yolov10_video_inference(video, model_id, image_size, conf_threshold, overlay
 
     cap.release()
     out.release()
+    if os.path.exists(video_path):
+        os.remove(video_path)
 
     yield None, output_video_path, None
 
