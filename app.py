@@ -48,7 +48,20 @@ def _apply_face_filter(frame, overlay_image, opacity):
 
 def _get_model(model_id):
     if model_id not in _MODEL_CACHE:
-        _MODEL_CACHE[model_id] = YOLOv10.from_pretrained(f"jameslahm/{model_id}")
+        try:
+            # Preferred path: pull official YOLOv10 weights from Hub.
+            _MODEL_CACHE[model_id] = YOLOv10.from_pretrained(f"jameslahm/{model_id}")
+        except Exception as e:
+            # Fallback path: use local *.pt weights to avoid optional dependency issues
+            # (e.g., environments where safetensors helpers are unavailable).
+            fallback_weights = f"{model_id}.pt"
+            try:
+                _MODEL_CACHE[model_id] = YOLOv10(fallback_weights)
+            except Exception:
+                raise RuntimeError(
+                    f"Failed to load model '{model_id}'. Tried Hub and local fallback '{fallback_weights}'. "
+                    f"Original error: {e}"
+                ) from e
     return _MODEL_CACHE[model_id]
 
 
@@ -141,8 +154,8 @@ def app():
     ):
         with gr.Row():
             with gr.Column():
-                image = gr.Image(type="pil", label="Image", sources=["upload", "webcam"], visible=True)
-                video = gr.Video(label="Video / Webcam Recording", sources=["upload", "webcam"], visible=False)
+                image = gr.Image(type="pil", label="Image", sources=["upload"], visible=True)
+                video = gr.Video(label="Video", sources=["upload"], visible=False)
                 input_type = gr.Radio(
                     choices=["Image", "Video"],
                     value="Image",
