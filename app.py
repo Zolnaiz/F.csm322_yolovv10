@@ -117,6 +117,67 @@ def realtime_face_recognition(frame):
     return labeled[:, :, ::-1], summary
 
 
+
+
+def _box_iou(a, b):
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+    if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+        return 0.0
+    inter = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+    area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+    area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _count_unique_people(result, trackers, next_id, iou_threshold=0.35, ttl=20):
+    if not getattr(result, "boxes", None):
+        for tid in list(trackers):
+            trackers[tid]["miss"] += 1
+            if trackers[tid]["miss"] > ttl:
+                trackers.pop(tid, None)
+        return 0, trackers, next_id
+
+    names = result.names
+    xyxy = result.boxes.xyxy.detach().cpu().numpy()
+    classes = result.boxes.cls.detach().cpu().numpy().astype(int)
+    person_boxes = []
+    for box, cls_idx in zip(xyxy, classes):
+        cls_name = names.get(cls_idx, str(cls_idx)) if isinstance(names, dict) else names[cls_idx]
+        if cls_name == "person":
+            person_boxes.append(tuple(box.tolist()))
+
+    matched_trackers = set()
+    for box in person_boxes:
+        best_tid = None
+        best_iou = 0.0
+        for tid, state in trackers.items():
+            iou = _box_iou(box, state["box"])
+            if iou > best_iou:
+                best_iou = iou
+                best_tid = tid
+        if best_tid is not None and best_iou >= iou_threshold:
+            trackers[best_tid]["box"] = box
+            trackers[best_tid]["miss"] = 0
+            matched_trackers.add(best_tid)
+        else:
+            trackers[next_id] = {"box": box, "miss": 0}
+            matched_trackers.add(next_id)
+            next_id += 1
+
+    for tid in list(trackers):
+        if tid not in matched_trackers:
+            trackers[tid]["miss"] += 1
+            if trackers[tid]["miss"] > ttl:
+                trackers.pop(tid, None)
+
+    return len(trackers), trackers, next_id
+
 def _get_model(model_id):
     if model_id not in _MODEL_CACHE:
         fallback_weights = f"{model_id}.pt"
@@ -205,6 +266,9 @@ def yolov10_video_inference(video, model_id, image_size, conf_threshold, overlay
 
     frame_index = 0
     total_counts = {}
+    person_trackers = {}
+    next_person_id = 1
+    max_unique_people = 0
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
@@ -223,11 +287,15 @@ def yolov10_video_inference(video, model_id, image_size, conf_threshold, overlay
                 cls_name = names.get(idx, str(idx)) if isinstance(names, dict) else names[idx]
                 total_counts[cls_name] = total_counts.get(cls_name, 0) + 1
 
+        current_unique_people, person_trackers, next_person_id = _count_unique_people(result, person_trackers, next_person_id)
+        max_unique_people = max(max_unique_people, current_unique_people)
+
         annotated_frame = result.plot()
         out.write(annotated_frame)
         summary_text = " | ".join([f"`{k}`: **{v}**" for k, v in sorted(total_counts.items(), key=lambda x: (-x[1], x[0]))])
+        human_text = f"`Unique хүн:` **{current_unique_people}** | `Max:` **{max_unique_people}**"
         if frame_index % max(preview_stride, 1) == 0:
-            yield None, None, annotated_frame[:, :, ::-1], f"**Видео Нэгдсэн дүн:** {summary_text or 'одоогоор хоосон'}"
+            yield None, None, annotated_frame[:, :, ::-1], f"**Видео Нэгдсэн дүн:** {summary_text or 'одоогоор хоосон'} | {human_text}"
         frame_index += 1
 
     cap.release()
@@ -236,7 +304,7 @@ def yolov10_video_inference(video, model_id, image_size, conf_threshold, overlay
         os.remove(video_path)
 
     summary_text = " | ".join([f"`{k}`: **{v}**" for k, v in sorted(total_counts.items(), key=lambda x: (-x[1], x[0]))])
-    yield None, output_video_path, None, f"**Видео Нэгдсэн дүн:** {summary_text or 'илэрсэн объект байхгүй'}"
+    yield None, output_video_path, None, f"**Видео Нэгдсэн дүн:** {summary_text or 'илэрсэн объект байхгүй'} | `Max unique хүн:` **{max_unique_people}**"
 
 
 def app():
@@ -251,7 +319,9 @@ def app():
         .gr-button {border-radius: 12px !important; font-weight: 700 !important;}
         .gr-box, .block, .gr-panel {background: rgba(17,24,39,.78) !important; border: 1px solid rgba(148,163,184,.2) !important;}
         .title-main {text-align:center; font-size: 30px; font-weight: 800; margin: 8px 0 2px; color:#c7d2fe;}
-        .title-sub {text-align:center; color:#cbd5e1; margin-bottom: 12px;}
+        .title-sub {text-align:center; color:#ffffff; margin-bottom: 12px;}
+        .gradio-container, .gradio-container * {color: #ffffff !important;}
+        .gr-markdown p, .gr-markdown li, .gr-markdown span, label {color: #ffffff !important;}
         """,
     ) as demo:
         gr.Markdown("""<div class='title-main'>🚀 Smart Vision Control Center</div>
