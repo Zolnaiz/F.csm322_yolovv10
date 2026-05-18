@@ -82,6 +82,59 @@ COCO
 | [YOLOv10-L](https://huggingface.co/jameslahm/yolov10l) |   640  |     24.4M   |  120.3G   |     53.2%     | 7.28ms |
 | [YOLOv10-X](https://huggingface.co/jameslahm/yolov10x) |   640  |     29.5M    |   160.4G   |     54.4%     | 10.70ms |
 
+
+## YOLOv10 Computer Vision Web Demo (Image/Video/Webcam + Face Features)
+
+This repository includes a Gradio web app in `app.py` with:
+
+- Image upload object detection
+- Video upload frame-by-frame object detection
+- Webcam real-time detection
+- Mirror mode toggle
+- Glasses AR overlay (PNG) aligned by detected eyes
+- Face recognition using `known_faces/` directory
+
+### `known_faces/` structure
+
+```
+known_faces/
+  Bilguun/
+    1.jpg
+    2.jpg
+  Bat/
+    1.jpg
+  Naraa/
+    1.jpg
+```
+
+Unknown identities are shown as `Unknown`.
+
+### Install
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install --upgrade pip
+pip install -r requirements.txt
+pip install -e .
+```
+
+### Run
+
+```powershell
+python app.py
+```
+
+Open `http://127.0.0.1:7860`.
+
+### Error handling / model fallback
+
+If model loading fails:
+- tries `{model}.pt` in repo root
+- tries `weights/{model}.pt`
+- tries automatic download from YOLOv10 releases
+- if all fail, shows a clear user-facing error message
+
 ## Installation
 `conda` virtual environment is recommended. 
 ```
@@ -209,3 +262,64 @@ If our code or models help your work, please cite our paper:
   year={2024}
 }
 ```
+
+
+## YOLOv10 CV App (Improved)
+
+### Features
+- Image / Video / Webcam detection with YOLOv10
+- Mirror mode toggle
+- AR glasses overlay (user-upload PNG or default `assets/glasses.png`)
+- Face recognition from `known_faces/Name/*.jpg`
+- Face DB reload button and status text
+
+### known_faces бүтэц
+```text
+known_faces/
+  Bilguun/
+    1.jpg
+    2.jpg
+  Bat/
+    1.jpg
+  Naraa/
+    1.jpg
+```
+
+### Найзуудын зураг нэмэх
+1. `known_faces/` дотор хүний нэрээр folder үүсгэнэ.
+2. Folder тус бүрт тухайн хүний 1-5 тод зураг хийнэ.
+3. App дээр `Reload known_faces` дарж шинэчилнэ.
+4. Танигдахгүй бол `Unknown` гэж гарна.
+
+### Install
+```bash
+pip install -r requirements.txt
+pip install -e .
+# optional (better face recognition)
+pip install face_recognition
+```
+
+### Windows PowerShell
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install --upgrade pip
+pip install -r requirements.txt
+pip install -e .
+pip install face_recognition
+```
+
+### Run
+```bash
+python app.py
+```
+
+### Glasses filter ашиглах
+- `Glasses filter` toggle ON хийнэ.
+- Хэрэв `assets/glasses.png` байхгүй бол UI дээр `Glasses PNG (optional)` талбарт PNG upload хийнэ.
+- Нүд олдохгүй үед нүүрний байрлалаас ойролцоогоор шил байрлуулна.
+
+### Common errors
+- **Model load failed**: `yolov10*.pt` файлыг root эсвэл `weights/` дотор байрлуул.
+- **No known faces loaded**: `known_faces/Name/*.jpg` бүтэц зөв эсэхээ шалгаад `Reload known_faces` дар.
+- **face_recognition install хэцүү**: app автоматаар OpenCV embedding fallback ашиглана.
