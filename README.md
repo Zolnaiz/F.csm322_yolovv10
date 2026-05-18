@@ -262,3 +262,64 @@ If our code or models help your work, please cite our paper:
   year={2024}
 }
 ```
+
+
+## YOLOv10 CV App (Improved)
+
+### Features
+- Image / Video / Webcam detection with YOLOv10
+- Mirror mode toggle
+- AR glasses overlay (user-upload PNG or default `assets/glasses.png`)
+- Face recognition from `known_faces/Name/*.jpg`
+- Face DB reload button and status text
+
+### known_faces бүтэц
+```text
+known_faces/
+  Bilguun/
+    1.jpg
+    2.jpg
+  Bat/
+    1.jpg
+  Naraa/
+    1.jpg
+```
+
+### Найзуудын зураг нэмэх
+1. `known_faces/` дотор хүний нэрээр folder үүсгэнэ.
+2. Folder тус бүрт тухайн хүний 1-5 тод зураг хийнэ.
+3. App дээр `Reload known_faces` дарж шинэчилнэ.
+4. Танигдахгүй бол `Unknown` гэж гарна.
+
+### Install
+```bash
+pip install -r requirements.txt
+pip install -e .
+# optional (better face recognition)
+pip install face_recognition
+```
+
+### Windows PowerShell
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install --upgrade pip
+pip install -r requirements.txt
+pip install -e .
+pip install face_recognition
+```
+
+### Run
+```bash
+python app.py
+```
+
+### Glasses filter ашиглах
+- `Glasses filter` toggle ON хийнэ.
+- Хэрэв `assets/glasses.png` байхгүй бол UI дээр `Glasses PNG (optional)` талбарт PNG upload хийнэ.
+- Нүд олдохгүй үед нүүрний байрлалаас ойролцоогоор шил байрлуулна.
+
+### Common errors
+- **Model load failed**: `yolov10*.pt` файлыг root эсвэл `weights/` дотор байрлуул.
+- **No known faces loaded**: `known_faces/Name/*.jpg` бүтэц зөв эсэхээ шалгаад `Reload known_faces` дар.
+- **face_recognition install хэцүү**: app автоматаар OpenCV embedding fallback ашиглана.
