@@ -329,6 +329,10 @@ with gr.Blocks(title="YOLOv10 CV Demo") as demo:
 
     gr.Button("Reload known_faces").click(_reload_status, outputs=status)
 
+    urls = [
+        f"https://github.com/THU-MIG/yolov10/releases/download/v1.1/{weight_name}",
+        f"https://github.com/THU-MIG/yolov10/releases/download/v1.0/{weight_name}",
+    ]
 
 if __name__ == "__main__":
     demo.launch()
