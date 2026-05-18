@@ -1,13 +1,24 @@
 import gradio as gr
 import cv2
 import tempfile
+import numpy as np
 from ultralytics import YOLOv10
 
 
-def yolov10_inference(image, video, model_id, image_size, conf_threshold):
+def _apply_overlay(frame, overlay_image, opacity):
+    if overlay_image is None or opacity <= 0:
+        return frame
+    overlay = cv2.cvtColor(np.array(overlay_image.convert("RGB")), cv2.COLOR_RGB2BGR)
+    overlay = cv2.resize(overlay, (frame.shape[1], frame.shape[0]))
+    return cv2.addWeighted(frame, 1 - opacity, overlay, opacity, 0)
+
+
+def yolov10_inference(image, video, model_id, image_size, conf_threshold, overlay_image=None, overlay_opacity=0.0):
     model = YOLOv10.from_pretrained(f'jameslahm/{model_id}')
     if image:
-        results = model.predict(source=image, imgsz=image_size, conf=conf_threshold)
+        image_bgr = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
+        image_bgr = _apply_overlay(image_bgr, overlay_image, overlay_opacity)
+        results = model.predict(source=image_bgr, imgsz=image_size, conf=conf_threshold)
         annotated_image = results[0].plot()
         return annotated_image[:, :, ::-1], None
     else:
@@ -29,6 +40,7 @@ def yolov10_inference(image, video, model_id, image_size, conf_threshold):
             if not ret:
                 break
 
+            frame = _apply_overlay(frame, overlay_image, overlay_opacity)
             results = model.predict(source=frame, imgsz=image_size, conf=conf_threshold)
             annotated_frame = results[0].plot()
             out.write(annotated_frame)
@@ -48,12 +60,20 @@ def app():
     with gr.Blocks():
         with gr.Row():
             with gr.Column():
-                image = gr.Image(type="pil", label="Image", visible=True)
-                video = gr.Video(label="Video", visible=False)
+                image = gr.Image(type="pil", label="Image", sources=["upload", "webcam"], visible=True)
+                video = gr.Video(label="Video / Webcam Recording", sources=["upload", "webcam"], visible=False)
                 input_type = gr.Radio(
                     choices=["Image", "Video"],
                     value="Image",
                     label="Input Type",
+                )
+                overlay_image = gr.Image(type="pil", label="Filter Overlay (Canvas/Image)", sources=["upload", "clipboard", "webcam"])
+                overlay_opacity = gr.Slider(
+                    label="Filter Opacity",
+                    minimum=0.0,
+                    maximum=1.0,
+                    step=0.05,
+                    value=0.0,
                 )
                 model_id = gr.Dropdown(
                     label="Model",
@@ -101,16 +121,16 @@ def app():
             outputs=[image, video, output_image, output_video],
         )
 
-        def run_inference(image, video, model_id, image_size, conf_threshold, input_type):
+        def run_inference(image, video, model_id, image_size, conf_threshold, input_type, overlay_image, overlay_opacity):
             if input_type == "Image":
-                return yolov10_inference(image, None, model_id, image_size, conf_threshold)
+                return yolov10_inference(image, None, model_id, image_size, conf_threshold, overlay_image, overlay_opacity)
             else:
-                return yolov10_inference(None, video, model_id, image_size, conf_threshold)
+                return yolov10_inference(None, video, model_id, image_size, conf_threshold, overlay_image, overlay_opacity)
 
 
         yolov10_infer.click(
             fn=run_inference,
-            inputs=[image, video, model_id, image_size, conf_threshold, input_type],
+            inputs=[image, video, model_id, image_size, conf_threshold, input_type, overlay_image, overlay_opacity],
             outputs=[output_image, output_video],
         )
 
