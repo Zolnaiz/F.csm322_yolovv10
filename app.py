@@ -334,9 +334,6 @@ def app():
                         image = gr.Image(type="pil", label="Image", sources=["upload"], visible=True)
                         video = gr.Video(label="Video", sources=["upload"], visible=False)
                         input_type = gr.Radio(choices=["Image", "Video"], value="Image", label="Input Type")
-                        overlay_image = gr.Image(type="pil", label="Filter Overlay Image (optional)", sources=["upload"])
-                        overlay_opacity = gr.Slider(label="Filter Opacity", minimum=0.0, maximum=1.0, step=0.05, value=0.0)
-                        face_filter_only = gr.Checkbox(label="Apply filter on detected faces only", value=True)
                         model_id = gr.Dropdown(
                             label="Model",
                             choices=["yolov10n", "yolov10s", "yolov10m", "yolov10b", "yolov10l", "yolov10x"],
@@ -365,15 +362,14 @@ def app():
 
                 input_type.change(fn=update_visibility, inputs=[input_type], outputs=[image, video, output_image, output_video, live_preview])
 
-                def run_video_inference_with_status(image, video, model_id, image_size, conf_threshold, input_type, overlay_image,
-                                                    overlay_opacity, face_filter_only, preview_stride):
+                def run_video_inference_with_status(image, video, model_id, image_size, conf_threshold, input_type, preview_stride):
                     try:
                         if input_type == "Image":
                             if image is None:
                                 yield None, None, None, "⚠️ Please upload an image first.", ""
                                 return
                             out_img, out_vid, preview, summary = yolov10_inference(
-                                image, model_id, image_size, conf_threshold, overlay_image, overlay_opacity, face_filter_only
+                                image, model_id, image_size, conf_threshold
                             )
                             yield out_img, out_vid, preview, "✅ Detection completed.", summary
                             return
@@ -383,8 +379,7 @@ def app():
                             return
 
                         for _, out_video_path, preview_frame, summary in yolov10_video_inference(
-                            video, model_id, image_size, conf_threshold, overlay_image, overlay_opacity, face_filter_only,
-                            preview_stride,
+                            video, model_id, image_size, conf_threshold, preview_stride=preview_stride,
                         ):
                             status = "⏳ Processing video..." if out_video_path is None else "✅ Video done. You can download it."
                             yield None, out_video_path, preview_frame, status, summary
@@ -393,8 +388,7 @@ def app():
 
                 detect_btn.click(
                     fn=run_video_inference_with_status,
-                    inputs=[image, video, model_id, image_size, conf_threshold, input_type, overlay_image, overlay_opacity,
-                            face_filter_only, preview_stride],
+                    inputs=[image, video, model_id, image_size, conf_threshold, input_type, preview_stride],
                     outputs=[output_image, output_video, live_preview, status_text, result_summary],
                 )
 
