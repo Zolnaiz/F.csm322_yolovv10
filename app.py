@@ -3,6 +3,7 @@ import cv2
 import tempfile
 import os
 import numpy as np
+from urllib.request import urlretrieve
 from ultralytics import YOLOv10
 
 FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
@@ -48,20 +49,33 @@ def _apply_face_filter(frame, overlay_image, opacity):
 
 def _get_model(model_id):
     if model_id not in _MODEL_CACHE:
-        try:
-            # Preferred path: pull official YOLOv10 weights from Hub.
-            _MODEL_CACHE[model_id] = YOLOv10.from_pretrained(f"jameslahm/{model_id}")
-        except Exception as e:
-            # Fallback path: use local *.pt weights to avoid optional dependency issues
-            # (e.g., environments where safetensors helpers are unavailable).
-            fallback_weights = f"{model_id}.pt"
-            try:
-                _MODEL_CACHE[model_id] = YOLOv10(fallback_weights)
-            except Exception:
+        fallback_weights = f"{model_id}.pt"
+        if os.path.exists(fallback_weights):
+            _MODEL_CACHE[model_id] = YOLOv10(fallback_weights)
+            return _MODEL_CACHE[model_id]
+
+        # Avoid Hub safetensors code path by downloading plain .pt weights directly.
+        weights_dir = "weights"
+        os.makedirs(weights_dir, exist_ok=True)
+        cached_weights = os.path.join(weights_dir, fallback_weights)
+        if not os.path.exists(cached_weights):
+            urls = [
+                f"https://github.com/THU-MIG/yolov10/releases/download/v1.1/{fallback_weights}",
+                f"https://github.com/THU-MIG/yolov10/releases/download/v1.0/{fallback_weights}",
+            ]
+            last_error = None
+            for url in urls:
+                try:
+                    urlretrieve(url, cached_weights)
+                    break
+                except Exception as e:
+                    last_error = e
+            if not os.path.exists(cached_weights):
                 raise RuntimeError(
-                    f"Failed to load model '{model_id}'. Tried Hub and local fallback '{fallback_weights}'. "
-                    f"Original error: {e}"
-                ) from e
+                    f"Failed to load model '{model_id}'. Missing local weights '{fallback_weights}' and "
+                    f"automatic download failed. Last download error: {last_error}"
+                ) from last_error
+        _MODEL_CACHE[model_id] = YOLOv10(cached_weights)
     return _MODEL_CACHE[model_id]
 
 
