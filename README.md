@@ -82,6 +82,59 @@ COCO
 | [YOLOv10-L](https://huggingface.co/jameslahm/yolov10l) |   640  |     24.4M   |  120.3G   |     53.2%     | 7.28ms |
 | [YOLOv10-X](https://huggingface.co/jameslahm/yolov10x) |   640  |     29.5M    |   160.4G   |     54.4%     | 10.70ms |
 
+
+## YOLOv10 Computer Vision Web Demo (Image/Video/Webcam + Face Features)
+
+This repository includes a Gradio web app in `app.py` with:
+
+- Image upload object detection
+- Video upload frame-by-frame object detection
+- Webcam real-time detection
+- Mirror mode toggle
+- Glasses AR overlay (PNG) aligned by detected eyes
+- Face recognition using `known_faces/` directory
+
+### `known_faces/` structure
+
+```
+known_faces/
+  Bilguun/
+    1.jpg
+    2.jpg
+  Bat/
+    1.jpg
+  Naraa/
+    1.jpg
+```
+
+Unknown identities are shown as `Unknown`.
+
+### Install
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install --upgrade pip
+pip install -r requirements.txt
+pip install -e .
+```
+
+### Run
+
+```powershell
+python app.py
+```
+
+Open `http://127.0.0.1:7860`.
+
+### Error handling / model fallback
+
+If model loading fails:
+- tries `{model}.pt` in repo root
+- tries `weights/{model}.pt`
+- tries automatic download from YOLOv10 releases
+- if all fail, shows a clear user-facing error message
+
 ## Installation
 `conda` virtual environment is recommended. 
 ```
