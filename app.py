@@ -1,419 +1,244 @@
-import gradio as gr
-import cv2
-import tempfile
 import os
-import numpy as np
+import math
+import tempfile
+from pathlib import Path
 from urllib.request import urlretrieve
+
+import cv2
+import gradio as gr
+import numpy as np
+from PIL import Image
 from ultralytics import YOLOv10
 
+MODEL_CACHE = {}
+FACE_DB = []
+
 FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-_MODEL_CACHE = {}
-_FACE_GALLERY = []
+EYE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
 
 
-def _apply_overlay(frame, overlay_image, opacity):
-    if overlay_image is None or opacity <= 0:
-        return frame
-    overlay = cv2.cvtColor(np.array(overlay_image.convert("RGB")), cv2.COLOR_RGB2BGR)
-    overlay = cv2.resize(overlay, (frame.shape[1], frame.shape[0]))
-    return cv2.addWeighted(frame, 1 - opacity, overlay, opacity, 0)
+def _safe_model_load(model_id: str):
+    if model_id in MODEL_CACHE:
+        return MODEL_CACHE[model_id], None
 
+    weight_name = f"{model_id}.pt"
+    candidates = [Path(weight_name), Path("weights") / weight_name]
 
-def _blend_overlay_roi(roi, overlay_rgb, opacity):
-    if overlay_rgb.shape[-1] == 4:
-        overlay_bgr = cv2.cvtColor(overlay_rgb[:, :, :3], cv2.COLOR_RGB2BGR)
-        alpha = (overlay_rgb[:, :, 3].astype(np.float32) / 255.0) * opacity
-        alpha = np.expand_dims(alpha, axis=-1)
-        blended = (roi.astype(np.float32) * (1.0 - alpha) + overlay_bgr.astype(np.float32) * alpha)
-        return blended.astype(np.uint8)
+    urls = [
+        f"https://github.com/THU-MIG/yolov10/releases/download/v1.1/{weight_name}",
+        f"https://github.com/THU-MIG/yolov10/releases/download/v1.0/{weight_name}",
+    ]
 
-    overlay_bgr = cv2.cvtColor(overlay_rgb, cv2.COLOR_RGB2BGR)
-    return cv2.addWeighted(roi, 1 - opacity, overlay_bgr, opacity, 0)
-
-
-def _apply_face_filter(frame, overlay_image, opacity):
-    if overlay_image is None or opacity <= 0:
-        return frame
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-    if len(faces) == 0:
-        return frame
-
-    overlay_rgba = np.array(overlay_image.convert("RGBA"))
-    for x, y, w, h in faces:
-        resized = cv2.resize(overlay_rgba, (w, h))
-        roi = frame[y:y + h, x:x + w]
-        frame[y:y + h, x:x + w] = _blend_overlay_roi(roi, resized, opacity)
-    return frame
-
-
-def _extract_face_embedding(image_bgr):
-    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-    faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-    if len(faces) == 0:
-        return None
-
-    x, y, w, h = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)[0]
-    face = gray[y:y + h, x:x + w]
-    face = cv2.resize(face, (64, 64)).astype(np.float32) / 255.0
-    face = cv2.equalizeHist((face * 255).astype(np.uint8)).astype(np.float32) / 255.0
-    return face.flatten()
-
-
-def register_face(person_name, person_image):
-    if not person_name or person_image is None:
-        return "⚠️ Нэр болон зураг оруулна уу.", gr.update(choices=[p["name"] for p in _FACE_GALLERY])
-
-    image_bgr = cv2.cvtColor(np.array(person_image.convert("RGB")), cv2.COLOR_RGB2BGR)
-    embedding = _extract_face_embedding(image_bgr)
-    if embedding is None:
-        return "⚠️ Зурган дээр нүүр илэрсэнгүй.", gr.update(choices=[p["name"] for p in _FACE_GALLERY])
-
-    _FACE_GALLERY[:] = [p for p in _FACE_GALLERY if p["name"] != person_name.strip()]
-    _FACE_GALLERY.append({"name": person_name.strip(), "embedding": embedding})
-    return f"✅ '{person_name.strip()}' амжилттай бүртгэгдлээ.", gr.update(choices=[p["name"] for p in _FACE_GALLERY])
-
-
-def clear_faces():
-    _FACE_GALLERY.clear()
-    return "🧹 Бүртгэл цэвэрлэгдлээ.", gr.update(choices=[])
-
-
-def _recognize_faces(frame_bgr, threshold=0.38):
-    labeled = frame_bgr.copy()
-    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-    faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-    found_names = []
-
-    for x, y, w, h in faces:
-        face = gray[y:y + h, x:x + w]
-        face = cv2.resize(face, (64, 64)).astype(np.float32) / 255.0
-        face = cv2.equalizeHist((face * 255).astype(np.uint8)).astype(np.float32) / 255.0
-        emb = face.flatten()
-
-        best_name, best_dist = "Unknown", 1e9
-        for person in _FACE_GALLERY:
-            dist = np.linalg.norm(emb - person["embedding"])
-            if dist < best_dist:
-                best_dist = dist
-                best_name = person["name"]
-        if best_dist > threshold:
-            best_name = "Unknown"
-
-        found_names.append(best_name)
-        color = (50, 220, 120) if best_name != "Unknown" else (70, 120, 255)
-        cv2.rectangle(labeled, (x, y), (x + w, y + h), color, 2)
-        cv2.putText(labeled, best_name, (x, max(y - 8, 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-
-    return labeled, found_names
-
-
-def realtime_face_recognition(frame):
-    if frame is None:
-        return None, "⚠️ Камер идэвхжүүлнэ үү."
-    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-    labeled, names = _recognize_faces(frame_bgr)
-    summary = "Илэрсэн хүн: " + (", ".join(names) if names else "байхгүй")
-    return labeled[:, :, ::-1], summary
-
-
-
-
-def _box_iou(a, b):
-    ax1, ay1, ax2, ay2 = a
-    bx1, by1, bx2, by2 = b
-    inter_x1 = max(ax1, bx1)
-    inter_y1 = max(ay1, by1)
-    inter_x2 = min(ax2, bx2)
-    inter_y2 = min(ay2, by2)
-    if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
-        return 0.0
-    inter = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
-    area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
-    area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
-    union = area_a + area_b - inter
-    return inter / union if union > 0 else 0.0
-
-
-def _count_unique_people(result, trackers, next_id, iou_threshold=0.35, ttl=20):
-    if not getattr(result, "boxes", None):
-        for tid in list(trackers):
-            trackers[tid]["miss"] += 1
-            if trackers[tid]["miss"] > ttl:
-                trackers.pop(tid, None)
-        return 0, trackers, next_id
-
-    names = result.names
-    xyxy = result.boxes.xyxy.detach().cpu().numpy()
-    classes = result.boxes.cls.detach().cpu().numpy().astype(int)
-    person_boxes = []
-    for box, cls_idx in zip(xyxy, classes):
-        cls_name = names.get(cls_idx, str(cls_idx)) if isinstance(names, dict) else names[cls_idx]
-        if cls_name == "person":
-            person_boxes.append(tuple(box.tolist()))
-
-    matched_trackers = set()
-    for box in person_boxes:
-        best_tid = None
-        best_iou = 0.0
-        for tid, state in trackers.items():
-            iou = _box_iou(box, state["box"])
-            if iou > best_iou:
-                best_iou = iou
-                best_tid = tid
-        if best_tid is not None and best_iou >= iou_threshold:
-            trackers[best_tid]["box"] = box
-            trackers[best_tid]["miss"] = 0
-            matched_trackers.add(best_tid)
-        else:
-            trackers[next_id] = {"box": box, "miss": 0}
-            matched_trackers.add(next_id)
-            next_id += 1
-
-    for tid in list(trackers):
-        if tid not in matched_trackers:
-            trackers[tid]["miss"] += 1
-            if trackers[tid]["miss"] > ttl:
-                trackers.pop(tid, None)
-
-    return len(trackers), trackers, next_id
-
-def _get_model(model_id):
-    if model_id not in _MODEL_CACHE:
-        fallback_weights = f"{model_id}.pt"
-        if os.path.exists(fallback_weights):
-            _MODEL_CACHE[model_id] = YOLOv10(fallback_weights)
-            return _MODEL_CACHE[model_id]
-
-        weights_dir = "weights"
-        os.makedirs(weights_dir, exist_ok=True)
-        cached_weights = os.path.join(weights_dir, fallback_weights)
-        if not os.path.exists(cached_weights):
-            urls = [
-                f"https://github.com/THU-MIG/yolov10/releases/download/v1.1/{fallback_weights}",
-                f"https://github.com/THU-MIG/yolov10/releases/download/v1.0/{fallback_weights}",
-            ]
-            last_error = None
-            for url in urls:
+    try:
+        chosen = next((p for p in candidates if p.exists()), None)
+        if chosen is None:
+            os.makedirs("weights", exist_ok=True)
+            chosen = candidates[1]
+            for u in urls:
                 try:
-                    urlretrieve(url, cached_weights)
+                    urlretrieve(u, str(chosen))
                     break
-                except Exception as e:
-                    last_error = e
-            if not os.path.exists(cached_weights):
-                raise RuntimeError(
-                    f"Failed to load model '{model_id}'. Missing local weights '{fallback_weights}' and "
-                    f"automatic download failed. Last download error: {last_error}"
-                ) from last_error
-        _MODEL_CACHE[model_id] = YOLOv10(cached_weights)
-    return _MODEL_CACHE[model_id]
+                except Exception:
+                    continue
+        if not chosen.exists():
+            return None, (
+                f"Model '{model_id}' load failed: local file '{weight_name}' not found and auto-download failed. "
+                "Put weights manually into project root or weights/ folder."
+            )
+
+        MODEL_CACHE[model_id] = YOLOv10(str(chosen))
+        return MODEL_CACHE[model_id], None
+    except Exception as e:
+        return None, f"Model '{model_id}' initialize error: {e}"
 
 
-def _build_summary(result, mode_name):
-    if not result or not getattr(result, "boxes", None):
-        return f"**{mode_name}**: Илэрсэн объект байхгүй."
-    names = result.names
-    classes = result.boxes.cls.detach().cpu().numpy().astype(int).tolist()
-    counts = {}
-    for idx in classes:
-        cls_name = names.get(idx, str(idx)) if isinstance(names, dict) else names[idx]
-        counts[cls_name] = counts.get(cls_name, 0) + 1
-    txt = " | ".join([f"`{k}`: **{v}**" for k, v in sorted(counts.items(), key=lambda x: (-x[1], x[0]))])
-    return f"**{mode_name} Нэгдсэн дүн:** {txt}"
+def _to_embedding(face_bgr):
+    gray = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
+    gray = cv2.resize(gray, (112, 112))
+    gray = cv2.equalizeHist(gray)
+    return (gray.astype(np.float32) / 255.0).flatten()
 
 
-def yolov10_inference(image, model_id, image_size, conf_threshold, overlay_image=None, overlay_opacity=0.0,
-                      face_filter_only=False):
+def load_known_faces(folder="known_faces"):
+    FACE_DB.clear()
+    root = Path(folder)
+    if not root.exists():
+        return 0
+    for person_dir in root.iterdir():
+        if not person_dir.is_dir():
+            continue
+        embeddings = []
+        for img_path in person_dir.glob("*.*"):
+            img = cv2.imread(str(img_path))
+            if img is None:
+                continue
+            faces = FACE_CASCADE.detectMultiScale(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), 1.1, 5)
+            if len(faces) == 0:
+                continue
+            x, y, w, h = sorted(faces, key=lambda z: z[2] * z[3], reverse=True)[0]
+            embeddings.append(_to_embedding(img[y:y + h, x:x + w]))
+        if embeddings:
+            FACE_DB.append({"name": person_dir.name, "embeddings": embeddings})
+    return len(FACE_DB)
+
+
+def _recognize_face(face_roi, threshold=0.52):
+    if not FACE_DB:
+        return "Unknown"
+    emb = _to_embedding(face_roi)
+    best_name, best_dist = "Unknown", 1e9
+    for person in FACE_DB:
+        for ref in person["embeddings"]:
+            d = np.linalg.norm(emb - ref)
+            if d < best_dist:
+                best_dist, best_name = d, person["name"]
+    return best_name if best_dist <= threshold else "Unknown"
+
+
+def _overlay_glasses(frame_bgr, glasses_rgba):
+    if glasses_rgba is None:
+        return frame_bgr
+    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    faces = FACE_CASCADE.detectMultiScale(gray, 1.1, 5, minSize=(50, 50))
+    for (x, y, w, h) in faces:
+        face_gray = gray[y:y + h, x:x + w]
+        eyes = EYE_CASCADE.detectMultiScale(face_gray, 1.1, 6)
+        if len(eyes) < 2:
+            continue
+        eyes = sorted(eyes, key=lambda e: e[0])[:2]
+        centers = []
+        for ex, ey, ew, eh in eyes:
+            centers.append((x + ex + ew // 2, y + ey + eh // 2))
+        (x1, y1), (x2, y2) = centers
+        angle = math.degrees(math.atan2(y2 - y1, x2 - x1))
+        eye_dist = int(math.hypot(x2 - x1, y2 - y1))
+
+        g = np.array(glasses_rgba.convert("RGBA"))
+        target_w = max(eye_dist * 2, 60)
+        scale = target_w / g.shape[1]
+        target_h = int(g.shape[0] * scale)
+        g = cv2.resize(g, (target_w, target_h))
+
+        M = cv2.getRotationMatrix2D((target_w // 2, target_h // 2), angle, 1.0)
+        g = cv2.warpAffine(g, M, (target_w, target_h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_TRANSPARENT)
+
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        x0, y0 = cx - target_w // 2, cy - target_h // 2
+        x1c, y1c = max(0, x0), max(0, y0)
+        x2c, y2c = min(frame_bgr.shape[1], x0 + target_w), min(frame_bgr.shape[0], y0 + target_h)
+        if x1c >= x2c or y1c >= y2c:
+            continue
+        gx1, gy1 = x1c - x0, y1c - y0
+        gx2, gy2 = gx1 + (x2c - x1c), gy1 + (y2c - y1c)
+        roi = frame_bgr[y1c:y2c, x1c:x2c]
+        g_crop = g[gy1:gy2, gx1:gx2]
+        alpha = (g_crop[:, :, 3:4].astype(np.float32) / 255.0)
+        roi[:] = (alpha * g_crop[:, :, :3] + (1 - alpha) * roi).astype(np.uint8)
+    return frame_bgr
+
+
+def _process_frame(frame_bgr, model, conf, mirror, glasses_on, glasses_img, recog_on):
+    if mirror:
+        frame_bgr = cv2.flip(frame_bgr, 1)
+    result = model.predict(source=frame_bgr, conf=conf, verbose=False)[0]
+    out = result.plot()
+
+    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    faces = FACE_CASCADE.detectMultiScale(gray, 1.1, 5)
+    for x, y, w, h in faces:
+        if recog_on:
+            name = _recognize_face(frame_bgr[y:y + h, x:x + w])
+            color = (0, 255, 0) if name != "Unknown" else (0, 160, 255)
+            cv2.rectangle(out, (x, y), (x + w, y + h), color, 2)
+            cv2.putText(out, name, (x, y - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+    if glasses_on:
+        out = _overlay_glasses(out, glasses_img)
+    return out
+
+
+def run_image(image, model_id, conf, mirror, glasses_on, glasses_img, recog_on):
     if image is None:
-        return None, None, None, ""
-
-    model = _get_model(model_id)
-    image_bgr = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
-    if face_filter_only:
-        image_bgr = _apply_face_filter(image_bgr, overlay_image, overlay_opacity)
-    else:
-        image_bgr = _apply_overlay(image_bgr, overlay_image, overlay_opacity)
-    results = model.predict(source=image_bgr, imgsz=image_size, conf=conf_threshold)
-    annotated_image = results[0].plot()
-    return annotated_image[:, :, ::-1], None, annotated_image[:, :, ::-1], _build_summary(results[0], "Зураг")
+        return None, "Image оруулна уу."
+    model, err = _safe_model_load(model_id)
+    if err:
+        return None, err
+    frame = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
+    out = _process_frame(frame, model, conf, mirror, glasses_on, glasses_img, recog_on)
+    return out[:, :, ::-1], "Done"
 
 
-def yolov10_video_inference(video, model_id, image_size, conf_threshold, overlay_image=None, overlay_opacity=0.0,
-                            face_filter_only=False, preview_stride=1):
-    if video is None:
-        yield None, None, None, ""
-        return
-
-    model = _get_model(model_id)
-    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as input_tmp:
-        with open(video, "rb") as g:
-            input_tmp.write(g.read())
-        video_path = input_tmp.name
+def run_video(video_path, model_id, conf, mirror, glasses_on, glasses_img, recog_on):
+    if not video_path:
+        return None, "Video оруулна уу."
+    model, err = _safe_model_load(model_id)
+    if err:
+        return None, err
 
     cap = cv2.VideoCapture(video_path)
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 24
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    out_path = tempfile.mktemp(suffix=".mp4")
+    writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
 
-    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as output_tmp:
-        output_video_path = output_tmp.name
-    if fps <= 0:
-        fps = 25.0
-    out = cv2.VideoWriter(output_video_path, cv2.VideoWriter_fourcc(*'vp80'), fps, (frame_width, frame_height))
-    if not out.isOpened():
-        output_video_path = output_video_path.rsplit(".", 1)[0] + ".mp4"
-        out = cv2.VideoWriter(output_video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (frame_width, frame_height))
-
-    frame_index = 0
-    total_counts = {}
-    person_trackers = {}
-    next_person_id = 1
-    max_unique_people = 0
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
+    while True:
+        ok, frame = cap.read()
+        if not ok:
             break
-
-        if face_filter_only:
-            frame = _apply_face_filter(frame, overlay_image, overlay_opacity)
-        else:
-            frame = _apply_overlay(frame, overlay_image, overlay_opacity)
-        results = model.predict(source=frame, imgsz=image_size, conf=conf_threshold)
-        result = results[0]
-        if getattr(result, "boxes", None):
-            names = result.names
-            classes = result.boxes.cls.detach().cpu().numpy().astype(int).tolist()
-            for idx in classes:
-                cls_name = names.get(idx, str(idx)) if isinstance(names, dict) else names[idx]
-                total_counts[cls_name] = total_counts.get(cls_name, 0) + 1
-
-        current_unique_people, person_trackers, next_person_id = _count_unique_people(result, person_trackers, next_person_id)
-        max_unique_people = max(max_unique_people, current_unique_people)
-
-        annotated_frame = result.plot()
-        out.write(annotated_frame)
-        summary_text = " | ".join([f"`{k}`: **{v}**" for k, v in sorted(total_counts.items(), key=lambda x: (-x[1], x[0]))])
-        human_text = f"`Unique хүн:` **{current_unique_people}** | `Max:` **{max_unique_people}**"
-        if frame_index % max(preview_stride, 1) == 0:
-            yield None, None, annotated_frame[:, :, ::-1], f"**Видео Нэгдсэн дүн:** {summary_text or 'одоогоор хоосон'} | {human_text}"
-        frame_index += 1
+        writer.write(_process_frame(frame, model, conf, mirror, glasses_on, glasses_img, recog_on))
 
     cap.release()
-    out.release()
-    if os.path.exists(video_path):
-        os.remove(video_path)
-
-    summary_text = " | ".join([f"`{k}`: **{v}**" for k, v in sorted(total_counts.items(), key=lambda x: (-x[1], x[0]))])
-    yield None, output_video_path, None, f"**Видео Нэгдсэн дүн:** {summary_text or 'илэрсэн объект байхгүй'} | `Max unique хүн:` **{max_unique_people}**"
+    writer.release()
+    return out_path, "Done"
 
 
-def app():
-    with gr.Blocks(
-        theme=gr.themes.Soft(
-            primary_hue="emerald",
-            neutral_hue="slate",
-            font=["Inter", "ui-sans-serif", "system-ui"],
-        ),
-        css="""
-        body, .gradio-container {background: linear-gradient(140deg, #0f172a, #111827) !important; color: #e5e7eb !important;}
-        .gr-button {border-radius: 12px !important; font-weight: 700 !important;}
-        .gr-box, .block, .gr-panel {background: rgba(17,24,39,.78) !important; border: 1px solid rgba(148,163,184,.2) !important;}
-        .title-main {text-align:center; font-size: 30px; font-weight: 800; margin: 8px 0 2px; color:#c7d2fe;}
-        .title-sub {text-align:center; color:#ffffff; margin-bottom: 12px;}
-        .gradio-container, .gradio-container * {color: #ffffff !important;}
-        .gr-markdown p, .gr-markdown li, .gr-markdown span, label {color: #ffffff !important;}
-        """,
-    ) as demo:
-        gr.Markdown("""<div class='title-main'>🚀 Smart Vision Control Center</div>
-        <div class='title-sub'>Object detection, result aggregation, download, and real-time face recognition.</div>""")
-
-        with gr.Tabs():
-            with gr.TabItem("📦 Detection Studio"):
-                with gr.Row():
-                    with gr.Column():
-                        image = gr.Image(type="pil", label="Image", sources=["upload"], visible=True)
-                        video = gr.Video(label="Video", sources=["upload"], visible=False)
-                        input_type = gr.Radio(choices=["Image", "Video"], value="Image", label="Input Type")
-                        model_id = gr.Dropdown(
-                            label="Model",
-                            choices=["yolov10n", "yolov10s", "yolov10m", "yolov10b", "yolov10l", "yolov10x"],
-                            value="yolov10m",
-                        )
-                        image_size = gr.Slider(label="Image Size", minimum=320, maximum=1280, step=32, value=640)
-                        conf_threshold = gr.Slider(label="Confidence Threshold", minimum=0.0, maximum=1.0, step=0.05, value=0.25)
-                        preview_stride = gr.Slider(label="Live Preview Frame Stride (Video)", minimum=1, maximum=10, step=1, value=2)
-                        detect_btn = gr.Button(value="🚀 Detect & Aggregate")
-                        status_text = gr.Markdown("✅ Ready")
-
-                    with gr.Column():
-                        output_image = gr.Image(type="numpy", label="Annotated Image", visible=True)
-                        output_video = gr.Video(label="Annotated Video (татаж авах боломжтой)", visible=False)
-                        live_preview = gr.Image(type="numpy", label="Live Video Preview", visible=False)
-                        result_summary = gr.Markdown("**Нэгдсэн дүн:** -")
-
-                def update_visibility(input_mode):
-                    return (
-                        gr.update(visible=input_mode == "Image"),
-                        gr.update(visible=input_mode == "Video"),
-                        gr.update(visible=input_mode == "Image"),
-                        gr.update(visible=input_mode == "Video"),
-                        gr.update(visible=input_mode == "Video"),
-                    )
-
-                input_type.change(fn=update_visibility, inputs=[input_type], outputs=[image, video, output_image, output_video, live_preview])
-
-                def run_video_inference_with_status(image, video, model_id, image_size, conf_threshold, input_type, preview_stride):
-                    try:
-                        if input_type == "Image":
-                            if image is None:
-                                yield None, None, None, "⚠️ Please upload an image first.", ""
-                                return
-                            out_img, out_vid, preview, summary = yolov10_inference(
-                                image, model_id, image_size, conf_threshold
-                            )
-                            yield out_img, out_vid, preview, "✅ Detection completed.", summary
-                            return
-
-                        if video is None:
-                            yield None, None, None, "⚠️ Please upload a video first.", ""
-                            return
-
-                        for _, out_video_path, preview_frame, summary in yolov10_video_inference(
-                            video, model_id, image_size, conf_threshold, preview_stride=preview_stride,
-                        ):
-                            status = "⏳ Processing video..." if out_video_path is None else "✅ Video done. You can download it."
-                            yield None, out_video_path, preview_frame, status, summary
-                    except Exception as e:
-                        yield None, None, None, f"❌ Error: {str(e)}", ""
-
-                detect_btn.click(
-                    fn=run_video_inference_with_status,
-                    inputs=[image, video, model_id, image_size, conf_threshold, input_type, preview_stride],
-                    outputs=[output_image, output_video, live_preview, status_text, result_summary],
-                )
-
-            with gr.TabItem("🧑‍💻 Realtime Face ID"):
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        person_name = gr.Textbox(label="Хүний нэр")
-                        person_image = gr.Image(type="pil", label="Бүртгэх зураг", sources=["upload"])
-                        register_btn = gr.Button("➕ Хүн бүртгэх")
-                        clear_btn = gr.Button("🧹 Бүртгэлийг цэвэрлэх")
-                        register_status = gr.Markdown("Бүртгэл хоосон.")
-                        known_people = gr.Dropdown(label="Бүртгэлтэй хүмүүс", choices=[], interactive=False)
-                    with gr.Column(scale=2):
-                        cam = gr.Image(sources=["webcam"], streaming=True, type="numpy", label="Realtime Camera")
-                        face_output = gr.Image(type="numpy", label="Face Recognition Output")
-                        face_summary = gr.Markdown("Илэрсэн хүн: -")
-
-                register_btn.click(register_face, [person_name, person_image], [register_status, known_people])
-                clear_btn.click(clear_faces, outputs=[register_status, known_people])
-                cam.stream(realtime_face_recognition, [cam], [face_output, face_summary])
-
-    return demo
+def run_webcam(frame, model_id, conf, mirror, glasses_on, glasses_img, recog_on):
+    if frame is None:
+        return None
+    model, err = _safe_model_load(model_id)
+    if err:
+        return frame
+    bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+    out = _process_frame(bgr, model, conf, mirror, glasses_on, glasses_img, recog_on)
+    return out[:, :, ::-1]
 
 
-gradio_app = app()
+with gr.Blocks(title="YOLOv10 CV Demo") as demo:
+    gr.Markdown("# YOLOv10 Computer Vision Demo")
+    known = load_known_faces("known_faces")
+    status = gr.Markdown(f"Known faces loaded: **{known}**")
 
-if __name__ == '__main__':
-    gradio_app.launch()
+    model_id = gr.Dropdown(["yolov10n", "yolov10s", "yolov10m", "yolov10b", "yolov10l", "yolov10x"], value="yolov10n", label="Model")
+    conf = gr.Slider(0.1, 0.9, value=0.25, step=0.01, label="Confidence")
+    mirror = gr.Checkbox(label="Mirror mode", value=False)
+    glasses_toggle = gr.Checkbox(label="Glasses filter", value=False)
+    face_recog = gr.Checkbox(label="Face recognition", value=True)
+    glasses_img = gr.Image(type="pil", label="Glasses PNG (transparent)")
+
+    with gr.Tabs():
+        with gr.Tab("Image"):
+            inp = gr.Image(type="pil")
+            out = gr.Image()
+            msg = gr.Textbox(label="Status")
+            btn = gr.Button("Run")
+            btn.click(run_image, [inp, model_id, conf, mirror, glasses_toggle, glasses_img, face_recog], [out, msg])
+
+        with gr.Tab("Video"):
+            vin = gr.Video()
+            vout = gr.Video()
+            vmsg = gr.Textbox(label="Status")
+            vbtn = gr.Button("Run")
+            vbtn.click(run_video, [vin, model_id, conf, mirror, glasses_toggle, glasses_img, face_recog], [vout, vmsg])
+
+        with gr.Tab("Webcam"):
+            webcam_in = gr.Image(sources=["webcam"], type="numpy", streaming=True, label="Webcam")
+            webcam_out = gr.Image(type="numpy", label="Output")
+            webcam_in.stream(run_webcam, [webcam_in, model_id, conf, mirror, glasses_toggle, glasses_img, face_recog], webcam_out)
+
+    reload_btn = gr.Button("Reload known_faces")
+    reload_btn.click(lambda: f"Known faces loaded: **{load_known_faces('known_faces')}**", outputs=status)
+
+
+if __name__ == "__main__":
+    demo.launch()
