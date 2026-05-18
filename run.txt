@@ -1,1 +1,1 @@
-python -c "from ultralytics import YOLO; model=YOLO('yolov10n.pt'); model.predict(source=0, show=True)"
+python -c "from ultralytics import YOLO; model=YOLO('yolov10n.pt'); model.predict(source='https://ultralytics.com/images/bus.jpg', save=True)"
