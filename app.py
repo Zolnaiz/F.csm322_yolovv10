@@ -157,7 +157,7 @@ def app():
                 conf_threshold,
             ],
             outputs=[output_image],
-            cache_examples='lazy',
+            cache_examples=False,
         )
 
 gradio_app = gr.Blocks()
